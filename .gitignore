@@ -1,0 +1,7 @@
+.env
+.terraform
+hosts.txt
+terraform_log.txt
+terraform.tfstate
+terraform.tfstate.backup
+vars.yml
