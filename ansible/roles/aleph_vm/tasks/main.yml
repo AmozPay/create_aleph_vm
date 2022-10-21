@@ -1,0 +1,130 @@
+- name: install caddy sources
+  block:
+    - name: add caddy sources [1/3]
+      apt_key:
+        url: https://dl.cloudsmith.io/public/caddy/stable/gpg.key
+        keyring: /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+    - name: add caddy sources [2/3]
+      apt_repository:
+        repo: deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main
+        filename: caddy-stable
+    - name: add caddy sources [3/3]
+      apt_repository:
+        repo: deb-src [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main
+        filename: caddy-stable
+
+- name: install requirements
+  apt:
+    name:
+      - docker.io
+      - caddy
+      - debian-keyring
+      - debian-archive-keyring
+      - apt-transport-https
+      - certbot
+      - python3-certbot-dns-digitalocean
+      - jq
+    update_cache: true
+    state: present
+
+- name: get latest release version
+  shell: curl -X GET https://api.github.com/repos/aleph-im/aleph-vm/releases | jq -r '.[0].tag_name'
+  register: latest_version
+
+- name: get current running version, if any
+  shell: apt list 2> /dev/null | grep aleph-vm | cut -d ' ' -f 2
+  register: current_version
+- debug:
+    msg: "current version: {{ current_version.stdout }}, latest version: {{ latest_version.stdout }}"
+- name: delete previous aleph version
+  apt:
+    name: aleph-vm
+    state: absent
+  when:  current_version.stdout != "" and latest_version.stdout != current_version.stdout
+
+- name: get aleph sources
+  get_url:
+    url: 'https://github.com/aleph-im/aleph-vm/releases/download/{{ latest_version.stdout }}/aleph-vm.ubuntu-20.04.deb'
+    dest: '/opt'
+
+- name: install aleph_vm
+  apt:
+    deb: '/opt/aleph-vm.ubuntu-20.04.deb'
+    state: present
+  register: oui
+
+- name: install certificates
+  block:
+    - name: get digitalocean key
+      copy:
+        content: "dns_digitalocean_token = {{ digitalocean_token }}"
+        dest: /certbot-creds.ini
+        mode: '0600'
+    - name: use certbot
+      shell:
+        cmd: certbot certonly --non-interactive --email "{{ certificate_email }}" --dns-digitalocean --dns-digitalocean-credentials /certbot-creds.ini --server https://acme-v02.api.letsencrypt.org/directory --agree-tos -d "{{ domain_name }},*.{{ domain_name }}"
+        creates: "/etc/letsencrypt/archive/{{ domain_name }}/privkey1.pem"
+    - name: change certificate permission
+      file:
+        path: /etc/letsencrypt/live/
+        owner: caddy
+        mode: '0755'
+    - file:
+        path: /etc/letsencrypt/archive/
+        owner: caddy
+        mode: '0755'
+    - file:
+        path: "/etc/letsencrypt/archive/{{ domain_name }}/privkey1.pem"
+        owner: caddy
+        mode: '0640'
+
+- name: setup caddy
+  block:
+    - name: create Caddy file
+      template:
+        src: roles/aleph_vm/files/Caddyfile
+        dest: /etc/caddy/Caddyfile
+      register: caddyfile
+    - name: restart caddy
+      service:
+        name: caddy
+        state: restarted
+      when: caddyfile.changed
+
+- name: start vm-connector
+  community.docker.docker_container:
+    name: vm-connector
+    image: alephim/vm-connector:alpha
+    state: started
+    restart_policy: always
+    published_ports: 4021:4021
+
+- name: setup aleph-supervisor
+  block:
+    - name: setup aleph vm domain name
+      lineinfile:
+        path: /etc/aleph-vm/supervisor.env
+        line: "ALEPH_VM_DOMAIN_NAME={{ domain_name }}"
+        create: true
+      register: aleph_domain_name
+    - name: setup aleph vm dns resolution
+      lineinfile:
+        path: /etc/aleph-vm/supervisor.env
+        line: "ALEPH_VM_DNS_RESOLUTION=resolvectl"
+        create: true
+      register: aleph_dns_resolution
+    - name: setup aleph vm to network interface
+      lineinfile:
+        path: /etc/aleph-vm/supervisor.env
+        line: "ALEPH_VM_NETWORK_INTERFACE={{ ansible_default_ipv4.alias }}"
+        create: true
+      register: aleph_network_interface
+
+- name: start supervisor
+  service:
+    name: aleph-vm-supervisor
+    state: restarted
+  when:
+    - aleph_dns_resolution.changed
+    - aleph_network_interface.changed
+    - aleph_domain_name.changed

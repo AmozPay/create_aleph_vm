@@ -1,0 +1,34 @@
+
+
+{
+    on_demand_tls {
+        interval 60s
+        burst    5
+    }
+}
+
+
+{{ domain_name }}:443 {
+    tls /etc/letsencrypt/live/{{ domain_name }}/fullchain.pem /etc/letsencrypt/live/{{ domain_name }}/privkey.pem
+    reverse_proxy http://127.0.0.1:4020 {
+        header_up Host {host}
+    }
+}
+
+*.{{ domain_name }}:443 {
+    tls /etc/letsencrypt/live/{{ domain_name }}/fullchain.pem /etc/letsencrypt/live/{{ domain_name }}/privkey.pem
+    reverse_proxy http://127.0.0.1:4020 {
+        # Forward Host header to the backend
+        header_up Host {host}
+    }
+}
+
+*:443 {
+    tls {
+        on_demand
+    }
+    reverse_proxy http://127.0.0.1:4020 {
+        # Forward Host header to the backend
+        header_up Host {host}
+    }
+}
